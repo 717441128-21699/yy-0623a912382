@@ -9,6 +9,7 @@ from app.schemas import (
     NotificationListResponse,
     NotificationHandleRequest,
     NotificationRuleSetRequest,
+    NotificationRuleToggleRequest,
     NotificationRuleListResponse,
 )
 from app.services.batch_service import NotificationService, NotificationRuleService, UserService
@@ -131,6 +132,33 @@ def set_notification_rule(
 
     svc = NotificationRuleService(db)
     data, err = svc.set_rule(req.project_id, req.event_type, req.roles, created_by)
+    if err:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err)
+    return data
+
+
+@router.post(
+    "/rules/toggle",
+    response_model=NotificationRuleListResponse,
+    summary="启用/停用指定事件的通知规则（仅项目经理）",
+    description="临时停用或恢复某个事件的推送，停用后该事件不再生成任何通知；仅项目所属项目经理可操作",
+)
+def toggle_notification_rule(
+    req: NotificationRuleToggleRequest,
+    operator_id: int = Query(..., description="当前操作人用户ID（项目经理）"),
+    db: Session = Depends(get_db),
+):
+    user_svc = UserService(db)
+    user = user_svc.get_user(operator_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="操作用户不存在")
+    if user.role != RoleEnum.PROJECT_MANAGER:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅项目经理可配置通知规则")
+    if user.project_id != req.project_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅可配置所属项目的通知规则")
+
+    svc = NotificationRuleService(db)
+    data, err = svc.toggle_rule(req.project_id, req.event_type, req.enabled, operator_id)
     if err:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err)
     return data

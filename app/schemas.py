@@ -283,6 +283,7 @@ class DeliveryRecordResponse(BaseModel):
     request_body: Optional[str] = None
     response_code: Optional[int] = None
     response_body: Optional[str] = None
+    duration_ms: Optional[int] = None
     retry_count: int
     error_message: Optional[str] = None
     delivered_at: Optional[datetime] = None
@@ -305,6 +306,10 @@ class DeliveryRecordListQuery(BaseModel):
 class DeliveryRecordListResponse(BaseModel):
     total: int
     items: List[DeliveryRecordResponse]
+    final_closed: bool = False
+    last_attempt_at: Optional[datetime] = None
+    success_attempts: int = 0
+    failed_attempts: int = 0
 
 
 class ManualPushRequest(BaseModel):
@@ -343,9 +348,31 @@ class TodoBatchItem(BaseModel):
     responsible_role: Optional[str] = None
     responsible_role_label: Optional[str] = None
     related_notification_ids: List[int] = Field(default_factory=list)
+    is_exception: bool = False
 
     class Config:
         from_attributes = True
+
+
+class TodoGroupItem(BaseModel):
+    group_type: str
+    label: str
+    count: int
+    status: Optional[str] = None
+
+
+class ProjectRoleTodoStat(BaseModel):
+    role: RoleEnum
+    role_label: str
+    pending_count: int
+
+
+class ProjectTodoOverview(BaseModel):
+    project_id: str
+    total_pending_batches: int
+    exception_count: int
+    latest_status_updated_at: Optional[datetime] = None
+    role_stats: List[ProjectRoleTodoStat] = Field(default_factory=list)
 
 
 class TodolistResponse(BaseModel):
@@ -353,10 +380,11 @@ class TodolistResponse(BaseModel):
     user_role: RoleEnum
     user_role_label: str
     total_count: int
-    groups: List[dict] = Field(default_factory=list)
+    groups: List[TodoGroupItem] = Field(default_factory=list)
     batches: List[TodoBatchItem] = Field(default_factory=list)
     notifications: List[NotificationResponse] = Field(default_factory=list)
     exception_batches: List[TodoBatchItem] = Field(default_factory=list)
+    project_overview: Optional[ProjectTodoOverview] = None
 
 
 class NotificationRuleSetRequest(BaseModel):
@@ -365,12 +393,19 @@ class NotificationRuleSetRequest(BaseModel):
     roles: List[RoleEnum]
 
 
+class NotificationRuleToggleRequest(BaseModel):
+    project_id: str
+    event_type: NotificationTypeEnum
+    enabled: bool
+
+
 class NotificationRuleItem(BaseModel):
     event_type: NotificationTypeEnum
     event_label: str
     roles: List[RoleEnum]
     role_labels: List[str]
     is_custom: bool
+    enabled: bool = True
     rule_id: Optional[int] = None
     updated_at: Optional[datetime] = None
 

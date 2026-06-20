@@ -367,7 +367,7 @@ class DeliveryService:
         if filters:
             q = q.filter(and_(*filters))
         total = q.count()
-        items = q.order_by(DeliveryRecord.created_at.desc()).offset(skip).limit(limit).all()
+        items = q.order_by(DeliveryRecord.attempt_no.asc()).offset(skip).limit(limit).all()
         return total, items
 
     def manual_push(
@@ -531,7 +531,7 @@ class TodolistService:
     def __init__(self, db: Session):
         self.db = db
 
-    def _batch_to_todo(self, batch: MaterialBatch, responsible_role: Optional[RoleEnum] = None) -> dict:
+    def _batch_to_todo(self, batch: MaterialBatch, responsible_role: Optional[RoleEnum] = None, is_exception: bool = False) -> dict:
         role = responsible_role or STATUS_RESPONSIBLE_ROLE.get(batch.current_status)
         notif_ids = [n.id for n in batch.notifications]
         return {
@@ -550,6 +550,76 @@ class TodolistService:
             "responsible_role": role.value if role else None,
             "responsible_role_label": ROLE_LABEL_MAP.get(role) if role else None,
             "related_notification_ids": notif_ids,
+            "is_exception": is_exception,
+        }
+
+    def _build_project_overview(self, project_id: str) -> dict:
+        from app.models import StatusRecord as SR
+        from sqlalchemy import func
+
+        role_stats = []
+        total_pending = 0
+        for role, statuses in ROLE_TODO_STATUS_MAP.items():
+            cnt = (
+                self.db.query(MaterialBatch)
+                .filter(
+                    MaterialBatch.project_id == project_id,
+                    MaterialBatch.current_status.in_(statuses),
+                )
+                .count()
+            )
+            total_pending += cnt
+            role_stats.append({
+                "role": role,
+                "role_label": ROLE_LABEL_MAP.get(role, str(role)),
+                "pending_count": cnt,
+            })
+
+        now = datetime.utcnow()
+        overdue_subq = (
+            self.db.query(SR.batch_id, func.max(SR.id).label("latest_id"))
+            .filter(
+                SR.to_status == StatusNodeEnum.REINSPECTION_PENDING,
+                SR.reinspection_deadline.isnot(None),
+            )
+            .group_by(SR.batch_id)
+            .subquery()
+        )
+        overdue_count = (
+            self.db.query(MaterialBatch)
+            .join(overdue_subq, overdue_subq.c.batch_id == MaterialBatch.id)
+            .join(SR, SR.id == overdue_subq.c.latest_id)
+            .filter(
+                MaterialBatch.project_id == project_id,
+                MaterialBatch.current_status == StatusNodeEnum.REINSPECTION_PENDING,
+                SR.reinspection_deadline < now,
+            )
+            .count()
+        )
+        reject_count = (
+            self.db.query(MaterialBatch)
+            .filter(
+                MaterialBatch.project_id == project_id,
+                MaterialBatch.current_status == StatusNodeEnum.SUPERVISOR_REJECTED,
+            )
+            .count()
+        )
+        exception_count = overdue_count + reject_count
+
+        latest_sr = (
+            self.db.query(SR)
+            .join(MaterialBatch, MaterialBatch.id == SR.batch_id)
+            .filter(MaterialBatch.project_id == project_id)
+            .order_by(SR.created_at.desc())
+            .first()
+        )
+
+        return {
+            "project_id": project_id,
+            "total_pending_batches": total_pending,
+            "exception_count": exception_count,
+            "latest_status_updated_at": latest_sr.created_at if latest_sr else None,
+            "role_stats": role_stats,
         }
 
     def get_todolist(self, user_id: int):
@@ -565,7 +635,7 @@ class TodolistService:
         project_id = user.project_id
         role = user.role
 
-        batch_list: List[MaterialBatch] = []
+        todo_batches: List[MaterialBatch] = []
         groups = []
 
         todo_statuses = ROLE_TODO_STATUS_MAP.get(role, [])
@@ -579,14 +649,14 @@ class TodolistService:
                 .order_by(MaterialBatch.updated_at.desc())
                 .all()
             )
-            batch_list.extend(todos)
+            todo_batches.extend(todos)
             for s in todo_statuses:
                 cnt = sum(1 for b in todos if b.current_status == s)
                 if cnt > 0:
                     groups.append({
                         "group_type": "status",
                         "status": s.value,
-                        "status_label": STATUS_LABEL_MAP.get(s, str(s)),
+                        "label": STATUS_LABEL_MAP.get(s, str(s)),
                         "count": cnt,
                     })
 
@@ -595,18 +665,19 @@ class TodolistService:
         _, unhandled_notifs = notif_svc.list_notifications(notif_q, skip=0, limit=200)
         notif_batch_ids = list({n.batch_id for n in unhandled_notifs})
         for bid in notif_batch_ids:
-            if bid not in [b.id for b in batch_list]:
+            if bid not in [b.id for b in todo_batches]:
                 b = self.db.query(MaterialBatch).filter(MaterialBatch.id == bid).first()
                 if b:
-                    batch_list.append(b)
+                    todo_batches.append(b)
         if unhandled_notifs:
             groups.append({
                 "group_type": "notification",
+                "status": None,
                 "label": "待处理通知",
                 "count": len(unhandled_notifs),
             })
 
-        exception_batches = []
+        exception_batches_data = []
         if role == RoleEnum.PROJECT_MANAGER:
             now = datetime.utcnow()
             overdue_subq = (
@@ -637,32 +708,53 @@ class TodolistService:
                 )
                 .all()
             )
-            for b in overs + rejects:
-                if b.id not in [x["batch_id"] for x in exception_batches]:
-                    exception_batches.append(self._batch_to_todo(b))
-            if exception_batches:
+            ex_batches = overs + rejects
+            ex_ids = set()
+            for b in ex_batches:
+                if b.id not in ex_ids:
+                    ex_ids.add(b.id)
+                    exception_batches_data.append(self._batch_to_todo(b, is_exception=True))
+                if b.id not in [x.id for x in todo_batches]:
+                    todo_batches.append(b)
+            if exception_batches_data:
                 groups.append({
                     "group_type": "exception",
+                    "status": None,
                     "label": "关注异常批次",
-                    "count": len(exception_batches),
+                    "count": len(exception_batches_data),
                 })
 
-        batch_items = [self._batch_to_todo(b) for b in batch_list]
+        todo_batch_items = []
+        todo_ids = set()
+        for b in todo_batches:
+            if b.id in todo_ids:
+                continue
+            todo_ids.add(b.id)
+            is_ex = b.id in [x["batch_id"] for x in exception_batches_data]
+            todo_batch_items.append(self._batch_to_todo(b, is_exception=is_ex))
+
         notif_items = []
         for n in unhandled_notifs:
             nd = n.__dict__.copy()
             nd["batch_no"] = n.batch.batch_no if n.batch else None
             notif_items.append(nd)
 
+        project_overview = None
+        if role == RoleEnum.PROJECT_MANAGER:
+            project_overview = self._build_project_overview(project_id)
+
+        total_count = len(todo_batch_items) + len(unhandled_notifs)
+
         return {
             "user_id": user.id,
             "user_role": role,
             "user_role_label": ROLE_LABEL_MAP.get(role, str(role)),
-            "total_count": len(batch_items) + len(unhandled_notifs),
+            "total_count": total_count,
             "groups": groups,
-            "batches": batch_items,
+            "batches": todo_batch_items,
             "notifications": notif_items,
-            "exception_batches": exception_batches,
+            "exception_batches": exception_batches_data,
+            "project_overview": project_overview,
         }, None
 
 
@@ -681,6 +773,7 @@ class NotificationRuleService:
                 "roles": r["roles"],
                 "role_labels": r["role_labels"],
                 "is_custom": r["is_custom"],
+                "enabled": r["enabled"],
                 "rule_id": r["rule_id"],
                 "updated_at": r["updated_at"],
             })
@@ -692,5 +785,12 @@ class NotificationRuleService:
     def set_rule(self, project_id: str, event_type, roles, created_by: int):
         from app.services.push_service import set_notify_roles
         rule = set_notify_roles(self.db, project_id, event_type, roles, created_by)
+        return self.list_rules(project_id), None
+
+    def toggle_rule(self, project_id: str, event_type, enabled: bool, operator_id: int):
+        from app.services.push_service import set_rule_enabled
+        rule = set_rule_enabled(self.db, project_id, event_type, enabled)
+        if not rule:
+            return None, "该事件暂无自定义规则，无法切换启用状态"
         return self.list_rules(project_id), None
 

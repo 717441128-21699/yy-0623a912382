@@ -139,6 +139,7 @@ class DeliveryRecord(Base):
     request_body = Column(Text)
     response_code = Column(Integer)
     response_body = Column(Text)
+    duration_ms = Column(Integer)
     retry_count = Column(Integer, default=0)
     error_message = Column(Text)
     delivered_at = Column(DateTime)

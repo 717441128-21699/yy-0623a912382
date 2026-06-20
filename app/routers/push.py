@@ -83,7 +83,7 @@ def list_channels(
     "/deliveries",
     response_model=DeliveryRecordListResponse,
     summary="查询投递记录（支持多维度筛选）",
-    description="按通知ID、通道ID、投递状态、批次号、接收人ID/角色、项目ID筛选，项目经理可追踪每次投递的成功/失败/重试轨迹",
+    description="按通知ID、通道ID、投递状态、批次号、接收人ID/角色、项目ID筛选，按尝试编号升序展示，可看到每次投递耗时和是否最终闭环",
 )
 def list_deliveries(
     query: DeliveryRecordListQuery,
@@ -94,6 +94,8 @@ def list_deliveries(
     svc = DeliveryService(db)
     total, items = svc.list_records(query, skip=skip, limit=limit)
     result = []
+    success_cnt = 0
+    last_time = None
     for item in items:
         resp = DeliveryRecordResponse.model_validate(item)
         resp.channel_name = item.channel.name if item.channel else None
@@ -106,7 +108,18 @@ def list_deliveries(
                 resp.batch_id = notif.batch.id
                 resp.batch_no = notif.batch.batch_no
         result.append(resp)
-    return DeliveryRecordListResponse(total=total, items=result)
+        if item.status == "success":
+            success_cnt += 1
+        if last_time is None or (item.created_at and item.created_at > last_time):
+            last_time = item.created_at
+    return DeliveryRecordListResponse(
+        total=total,
+        items=result,
+        final_closed=success_cnt > 0,
+        last_attempt_at=last_time,
+        success_attempts=success_cnt,
+        failed_attempts=len(result) - success_cnt,
+    )
 
 
 @router.post(
@@ -125,6 +138,8 @@ def manual_push(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err)
 
     result = []
+    success_cnt = 0
+    last_time = None
     for record in records:
         resp = DeliveryRecordResponse.model_validate(record)
         resp.channel_name = record.channel.name if record.channel else None
@@ -137,5 +152,16 @@ def manual_push(
                 resp.batch_id = notif.batch.id
                 resp.batch_no = notif.batch.batch_no
         result.append(resp)
+        if record.status == "success":
+            success_cnt += 1
+        if last_time is None or (record.created_at and record.created_at > last_time):
+            last_time = record.created_at
 
-    return DeliveryRecordListResponse(total=len(result), items=result)
+    return DeliveryRecordListResponse(
+        total=len(result),
+        items=result,
+        final_closed=success_cnt > 0,
+        last_attempt_at=last_time,
+        success_attempts=success_cnt,
+        failed_attempts=len(result) - success_cnt,
+    )

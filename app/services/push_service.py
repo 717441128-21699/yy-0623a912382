@@ -51,6 +51,7 @@ def _one_attempt(
     timeout: float,
     trigger: str = "auto",
 ) -> DeliveryRecord:
+    start_ts = datetime.utcnow()
     record = DeliveryRecord(
         notification_id=notification.id,
         channel_id=channel.id,
@@ -88,6 +89,9 @@ def _one_attempt(
         record.status = "failed"
         record.error_message = f"未知异常: {str(e)[:500]}"
 
+    end_ts = datetime.utcnow()
+    record.duration_ms = int((end_ts - start_ts).total_seconds() * 1000)
+
     db.commit()
     db.refresh(record)
     return record
@@ -98,6 +102,7 @@ def deliver_to_channel(
     notification: Notification,
     channel: PushChannel,
     trigger: str = "auto",
+    start_attempt_no: int = 1,
 ) -> List[DeliveryRecord]:
     batch = notification.batch
     payload = build_push_payload(notification, batch)
@@ -121,15 +126,16 @@ def deliver_to_channel(
     total_attempts = max_retries + 1
 
     records: List[DeliveryRecord] = []
-    for attempt_no in range(1, total_attempts + 1):
+    for i in range(total_attempts):
+        attempt_no = start_attempt_no + i
         rec = _one_attempt(db, notification, channel, payload, payload_json, headers, attempt_no, timeout, trigger)
         records.append(rec)
         if rec.status == "success":
             break
-        if attempt_no < total_attempts:
+        if i < total_attempts - 1:
             logger.info(
-                "投递失败，准备重试: notif_id=%s channel_id=%s attempt=%s/%s",
-                notification.id, channel.id, attempt_no, total_attempts,
+                "投递失败，准备重试: notif_id=%s channel_id=%s attempt=%s (seq %s/%s)",
+                notification.id, channel.id, attempt_no, i + 1, total_attempts,
             )
 
     return records
@@ -162,6 +168,8 @@ def manual_deliver(
     notification_id: int,
     channel_id: int,
 ) -> Tuple[Optional[List[DeliveryRecord]], Optional[str]]:
+    from sqlalchemy import func
+
     notification = db.query(Notification).filter(Notification.id == notification_id).first()
     if not notification:
         return None, "通知不存在"
@@ -176,7 +184,6 @@ def manual_deliver(
             DeliveryRecord.notification_id == notification_id,
             DeliveryRecord.channel_id == channel_id,
             DeliveryRecord.status == "success",
-            DeliveryRecord.trigger.in_(["auto", "manual"]),
         )
         .first()
     )
@@ -187,13 +194,33 @@ def manual_deliver(
                 DeliveryRecord.notification_id == notification_id,
                 DeliveryRecord.channel_id == channel_id,
             )
-            .order_by(DeliveryRecord.created_at)
+            .order_by(DeliveryRecord.attempt_no.asc())
             .all()
         )
         return prev_records, "该通知已通过此通道成功投递，可在历史记录中查看"
 
-    records = deliver_to_channel(db, notification, channel, trigger="manual")
-    return records, None
+    max_attempt_row = (
+        db.query(func.max(DeliveryRecord.attempt_no))
+        .filter(
+            DeliveryRecord.notification_id == notification_id,
+            DeliveryRecord.channel_id == channel_id,
+        )
+        .scalar()
+    )
+    start_no = (max_attempt_row or 0) + 1
+
+    new_records = deliver_to_channel(db, notification, channel, trigger="manual", start_attempt_no=start_no)
+
+    all_records = (
+        db.query(DeliveryRecord)
+        .filter(
+            DeliveryRecord.notification_id == notification_id,
+            DeliveryRecord.channel_id == channel_id,
+        )
+        .order_by(DeliveryRecord.attempt_no.asc())
+        .all()
+    )
+    return all_records, None
 
 
 DEFAULT_NOTIFY_ROLES = {
@@ -267,46 +294,72 @@ def set_notify_roles(
 
 
 def list_notify_rules(db: Session, project_id: str) -> List[dict]:
-    configured = (
+    from app.enums import NOTIFICATION_LABEL_MAP
+
+    all_rules = (
         db.query(NotificationRule)
-        .filter(
-            NotificationRule.project_id == project_id,
-            NotificationRule.enabled == True,
-        )
+        .filter(NotificationRule.project_id == project_id)
+        .order_by(NotificationRule.updated_at.desc())
         .all()
     )
-    configured_map = {r.event_type: r for r in configured}
+    latest_map = {}
+    for r in all_rules:
+        if r.event_type not in latest_map:
+            latest_map[r.event_type] = r
 
     result = []
     for et, default_roles in DEFAULT_NOTIFY_ROLES.items():
-        rule = configured_map.get(et)
+        rule = latest_map.get(et)
         if rule:
             try:
                 roles = [RoleEnum(rv) for rv in json.loads(rule.roles_json) if rv in RoleEnum._value2member_map_]
             except (json.JSONDecodeError, ValueError):
                 roles = default_roles
-            from app.enums import NOTIFICATION_LABEL_MAP
             result.append({
                 "event_type": et.value,
                 "event_label": NOTIFICATION_LABEL_MAP.get(et, str(et)),
-                "roles": [r.value for r in roles],
-                "role_labels": [ROLE_LABEL_MAP_FALLBACK(r) for r in roles],
+                "roles": [r.value for r in roles] if rule.enabled else [],
+                "role_labels": [ROLE_LABEL_MAP_FALLBACK(r) for r in roles] if rule.enabled else [],
                 "is_custom": True,
+                "enabled": rule.enabled,
                 "rule_id": rule.id,
                 "updated_at": rule.updated_at,
             })
         else:
-            from app.enums import NOTIFICATION_LABEL_MAP
             result.append({
                 "event_type": et.value,
                 "event_label": NOTIFICATION_LABEL_MAP.get(et, str(et)),
                 "roles": [r.value for r in default_roles],
                 "role_labels": [ROLE_LABEL_MAP_FALLBACK(r) for r in default_roles],
                 "is_custom": False,
+                "enabled": True,
                 "rule_id": None,
                 "updated_at": None,
             })
     return result
+
+
+def set_rule_enabled(
+    db: Session,
+    project_id: str,
+    event_type: NotificationTypeEnum,
+    enabled: bool,
+) -> Optional[NotificationRule]:
+    latest = (
+        db.query(NotificationRule)
+        .filter(
+            NotificationRule.project_id == project_id,
+            NotificationRule.event_type == event_type,
+        )
+        .order_by(NotificationRule.updated_at.desc())
+        .first()
+    )
+    if not latest:
+        return None
+    latest.enabled = enabled
+    db.commit()
+    db.refresh(latest)
+    return latest
 
 
 def ROLE_LABEL_MAP_FALLBACK(role: RoleEnum) -> str:
