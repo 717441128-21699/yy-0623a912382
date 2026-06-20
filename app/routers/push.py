@@ -82,8 +82,8 @@ def list_channels(
 @router.post(
     "/deliveries",
     response_model=DeliveryRecordListResponse,
-    summary="查询投递记录",
-    description="按通知ID、通道ID、投递状态筛选，追踪每次投递的成功/失败/重试",
+    summary="查询投递记录（支持多维度筛选）",
+    description="按通知ID、通道ID、投递状态、批次号、接收人ID/角色、项目ID筛选，项目经理可追踪每次投递的成功/失败/重试轨迹",
 )
 def list_deliveries(
     query: DeliveryRecordListQuery,
@@ -97,6 +97,14 @@ def list_deliveries(
     for item in items:
         resp = DeliveryRecordResponse.model_validate(item)
         resp.channel_name = item.channel.name if item.channel else None
+        notif = item.notification
+        if notif:
+            resp.notification_type = notif.type.value if notif.type else None
+            resp.recipient_id = notif.recipient_id
+            resp.recipient_role = notif.recipient_role.value if notif.recipient_role else None
+            if notif.batch:
+                resp.batch_id = notif.batch.id
+                resp.batch_no = notif.batch.batch_no
         result.append(resp)
     return DeliveryRecordListResponse(total=total, items=result)
 
@@ -117,4 +125,12 @@ def manual_push(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err)
     resp = DeliveryRecordResponse.model_validate(record)
     resp.channel_name = record.channel.name if record.channel else None
+    notif = record.notification
+    if notif:
+        resp.notification_type = notif.type.value if notif.type else None
+        resp.recipient_id = notif.recipient_id
+        resp.recipient_role = notif.recipient_role.value if notif.recipient_role else None
+        if notif.batch:
+            resp.batch_id = notif.batch.id
+            resp.batch_no = notif.batch.batch_no
     return resp

@@ -269,6 +269,11 @@ class PushChannelResponse(BaseModel):
 class DeliveryRecordResponse(BaseModel):
     id: int
     notification_id: int
+    notification_type: Optional[str] = None
+    batch_id: Optional[int] = None
+    batch_no: Optional[str] = None
+    recipient_id: Optional[int] = None
+    recipient_role: Optional[str] = None
     channel_id: int
     channel_name: Optional[str] = None
     status: str
@@ -288,6 +293,10 @@ class DeliveryRecordListQuery(BaseModel):
     notification_id: Optional[int] = None
     channel_id: Optional[int] = None
     status: Optional[str] = None
+    batch_no: Optional[str] = None
+    recipient_id: Optional[int] = None
+    recipient_role: Optional[RoleEnum] = None
+    project_id: Optional[str] = None
 
 
 class DeliveryRecordListResponse(BaseModel):
@@ -298,3 +307,18 @@ class DeliveryRecordListResponse(BaseModel):
 class ManualPushRequest(BaseModel):
     notification_id: int = Field(..., description="待投递的通知ID")
     channel_id: int = Field(..., description="目标推送通道ID")
+
+
+class StatusCountItem(BaseModel):
+    status: StatusNodeEnum
+    status_label: str
+    count: int
+
+
+class DashboardResponse(BaseModel):
+    project_id: str
+    total_batches: int
+    status_counts: List[StatusCountItem] = Field(default_factory=list)
+    overdue_reinspection_count: int
+    pending_material_staff_count: int
+    pending_quality_inspector_count: int

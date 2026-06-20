@@ -23,7 +23,10 @@ from app.schemas import (
     PushChannelCreate,
     PushChannelUpdate,
     DeliveryRecordListQuery,
+    DashboardResponse,
+    StatusCountItem,
 )
+from app.enums import StatusNodeEnum
 from app.utils import generate_batch_no
 from app.services.notification_service import (
     check_and_notify_status,
@@ -343,6 +346,8 @@ class DeliveryService:
 
     def list_records(self, query: DeliveryRecordListQuery, skip: int = 0, limit: int = 50) -> Tuple[int, List[DeliveryRecord]]:
         q = self.db.query(DeliveryRecord)
+        q = q.join(Notification, Notification.id == DeliveryRecord.notification_id)
+        q = q.join(MaterialBatch, MaterialBatch.id == Notification.batch_id)
         filters = []
         if query.notification_id:
             filters.append(DeliveryRecord.notification_id == query.notification_id)
@@ -350,6 +355,14 @@ class DeliveryService:
             filters.append(DeliveryRecord.channel_id == query.channel_id)
         if query.status:
             filters.append(DeliveryRecord.status == query.status)
+        if query.batch_no:
+            filters.append(MaterialBatch.batch_no == query.batch_no)
+        if query.recipient_id:
+            filters.append(Notification.recipient_id == query.recipient_id)
+        if query.recipient_role:
+            filters.append(Notification.recipient_role == query.recipient_role)
+        if query.project_id:
+            filters.append(MaterialBatch.project_id == query.project_id)
         if filters:
             q = q.filter(and_(*filters))
         total = q.count()
@@ -359,3 +372,68 @@ class DeliveryService:
     def manual_push(self, notification_id: int, channel_id: int) -> Tuple[Optional[DeliveryRecord], Optional[str]]:
         from app.services.push_service import manual_deliver
         return manual_deliver(self.db, notification_id, channel_id)
+
+
+class DashboardService:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def get_project_dashboard(self, project_id: str) -> DashboardResponse:
+        from datetime import datetime
+        from sqlalchemy import func
+
+        batches_q = self.db.query(MaterialBatch).filter(MaterialBatch.project_id == project_id)
+        total_batches = batches_q.count()
+
+        status_counts = []
+        for status_node in StatusNodeEnum:
+            cnt = batches_q.filter(MaterialBatch.current_status == status_node).count()
+            if cnt > 0:
+                status_counts.append(StatusCountItem(
+                    status=status_node,
+                    status_label=STATUS_LABEL_MAP.get(status_node, str(status_node)),
+                    count=cnt,
+                ))
+
+        now = datetime.utcnow()
+        from app.models import StatusRecord as SR
+
+        overdue_subq = (
+            self.db.query(SR.batch_id, func.max(SR.id).label("latest_id"))
+            .filter(SR.to_status == StatusNodeEnum.REINSPECTION_PENDING, SR.reinspection_deadline.isnot(None))
+            .group_by(SR.batch_id)
+            .subquery()
+        )
+        overdue_count = (
+            self.db.query(MaterialBatch)
+            .join(overdue_subq, overdue_subq.c.batch_id == MaterialBatch.id)
+            .join(SR, SR.id == overdue_subq.c.latest_id)
+            .filter(
+                MaterialBatch.project_id == project_id,
+                MaterialBatch.current_status == StatusNodeEnum.REINSPECTION_PENDING,
+                SR.reinspection_deadline < now,
+            )
+            .count()
+        )
+
+        pending_material = batches_q.filter(
+            MaterialBatch.current_status.in_([StatusNodeEnum.ARRIVED])
+        ).count()
+
+        pending_quality = batches_q.filter(
+            MaterialBatch.current_status.in_([
+                StatusNodeEnum.UNLOADED,
+                StatusNodeEnum.ACCEPTED,
+                StatusNodeEnum.REINSPECTION_PENDING,
+                StatusNodeEnum.SUPERVISOR_REJECTED,
+            ])
+        ).count()
+
+        return DashboardResponse(
+            project_id=project_id,
+            total_batches=total_batches,
+            status_counts=status_counts,
+            overdue_reinspection_count=overdue_count,
+            pending_material_staff_count=pending_material,
+            pending_quality_inspector_count=pending_quality,
+        )

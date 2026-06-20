@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -9,8 +9,9 @@ from app.schemas import (
     BatchListQuery,
     BatchListResponse,
     BatchListItem,
+    DashboardResponse,
 )
-from app.services.batch_service import BatchService
+from app.services.batch_service import BatchService, DashboardService
 
 router = APIRouter(prefix="/batches", tags=["批次管理"])
 
@@ -34,20 +35,17 @@ def register_batch(
 
 
 @router.get(
-    "/{batch_no}",
-    response_model=BatchDetailResponse,
-    summary="按批次号查询详情（含当前责任人+可流转节点）",
-    description="查询当前节点、责任人角色、下一步可走哪些节点及对应有权限的角色、历史流转记录、附件等",
+    "/dashboard",
+    response_model=DashboardResponse,
+    summary="项目批次流程看板",
+    description="按项目汇总各状态数量、逾期复检数量、待材料员处理数量、待质检员处理数量，供项目 App 首页直接展示",
 )
-def get_batch_detail(
-    batch_no: str,
+def get_dashboard(
+    project_id: str = Query(..., description="项目编号"),
     db: Session = Depends(get_db),
 ):
-    svc = BatchService(db)
-    detail = svc.get_batch_detail(batch_no)
-    if not detail:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="批次不存在")
-    return detail
+    svc = DashboardService(db)
+    return svc.get_project_dashboard(project_id)
 
 
 @router.post(
@@ -65,3 +63,20 @@ def list_batches(
     svc = BatchService(db)
     total, items = svc.list_batches(query, skip=skip, limit=limit)
     return BatchListResponse(total=total, items=[BatchListItem.model_validate(i) for i in items])
+
+
+@router.get(
+    "/{batch_no}",
+    response_model=BatchDetailResponse,
+    summary="按批次号查询详情（含当前责任人+可流转节点）",
+    description="查询当前节点、责任人角色、下一步可走哪些节点及对应有权限的角色、历史流转记录、附件等",
+)
+def get_batch_detail(
+    batch_no: str,
+    db: Session = Depends(get_db),
+):
+    svc = BatchService(db)
+    detail = svc.get_batch_detail(batch_no)
+    if not detail:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="批次不存在")
+    return detail
