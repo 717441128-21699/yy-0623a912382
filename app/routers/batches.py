@@ -10,8 +10,13 @@ from app.schemas import (
     BatchListResponse,
     BatchListItem,
     DashboardResponse,
+    TodolistResponse,
 )
-from app.services.batch_service import BatchService, DashboardService
+from app.services.batch_service import (
+    BatchService,
+    DashboardService,
+    TodolistService,
+)
 
 router = APIRouter(prefix="/batches", tags=["批次管理"])
 
@@ -68,8 +73,8 @@ def list_batches(
 @router.get(
     "/{batch_no}",
     response_model=BatchDetailResponse,
-    summary="按批次号查询详情（含当前责任人+可流转节点）",
-    description="查询当前节点、责任人角色、下一步可走哪些节点及对应有权限的角色、历史流转记录、附件等",
+    summary="按批次号查询详情（含当前责任人+可流转节点+流程时间线）",
+    description="查询当前节点、责任人角色、下一步可走节点、历史流转、通知、外部投递统一时间线",
 )
 def get_batch_detail(
     batch_no: str,
@@ -80,3 +85,23 @@ def get_batch_detail(
     if not detail:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="批次不存在")
     return detail
+
+
+@router.get(
+    "/todolist/mine",
+    response_model=TodolistResponse,
+    summary="当前登录人待办聚合",
+    description=(
+        "按登录人角色聚合待办：材料员→待卸货批次、质检员→待验收/复检批次、"
+        "监理→待审批批次、项目经理→异常批次（逾期复检+驳回）+ 未处理通知"
+    ),
+)
+def get_my_todolist(
+    user_id: int = Query(..., description="当前登录用户ID"),
+    db: Session = Depends(get_db),
+):
+    svc = TodolistService(db)
+    data, err = svc.get_todolist(user_id)
+    if err:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err)
+    return data

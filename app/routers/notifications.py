@@ -8,8 +8,10 @@ from app.schemas import (
     NotificationListQuery,
     NotificationListResponse,
     NotificationHandleRequest,
+    NotificationRuleSetRequest,
+    NotificationRuleListResponse,
 )
-from app.services.batch_service import NotificationService
+from app.services.batch_service import NotificationService, NotificationRuleService, UserService
 from app.services.notification_service import scan_and_notify_overdue
 from app.enums import RoleEnum, NotificationTypeEnum
 
@@ -91,3 +93,44 @@ def scan_overdue(db: Session = Depends(get_db)):
         "scanned_count": result["scanned"],
         "notified_count": result["notified"],
     }
+
+
+@router.get(
+    "/rules",
+    response_model=NotificationRuleListResponse,
+    summary="查询项目通知规则（事件→角色）",
+    description="返回指定项目所有事件的通知规则，含自定义规则+默认值（未配置的返回默认）",
+)
+def list_notification_rules(
+    project_id: str = Query(..., description="项目ID"),
+    db: Session = Depends(get_db),
+):
+    svc = NotificationRuleService(db)
+    return svc.list_rules(project_id)
+
+
+@router.post(
+    "/rules",
+    response_model=NotificationRuleListResponse,
+    summary="设置项目通知规则（仅项目经理）",
+    description="为指定事件配置要推送的角色列表，若传入空数组则表示该事件不推送给任何角色；仅项目所属项目经理可操作",
+)
+def set_notification_rule(
+    req: NotificationRuleSetRequest,
+    created_by: int = Query(..., description="当前操作人用户ID（项目经理）"),
+    db: Session = Depends(get_db),
+):
+    user_svc = UserService(db)
+    user = user_svc.get_user(created_by)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="操作用户不存在")
+    if user.role != RoleEnum.PROJECT_MANAGER:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅项目经理可配置通知规则")
+    if user.project_id != req.project_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅可配置所属项目的通知规则")
+
+    svc = NotificationRuleService(db)
+    data, err = svc.set_rule(req.project_id, req.event_type, req.roles, created_by)
+    if err:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err)
+    return data

@@ -174,6 +174,7 @@ class BatchService:
         resp.current_responsible_role = responsible_role
         resp.current_responsible_role_label = ROLE_LABEL_MAP.get(responsible_role) if responsible_role else None
         resp.next_available_nodes = _build_next_nodes(batch.current_status)
+        resp.timeline = _build_timeline(self.db, batch)
         return resp
 
     def list_batches(self, query: BatchListQuery, skip: int = 0, limit: int = 50) -> Tuple[int, List[MaterialBatch]]:
@@ -369,7 +370,9 @@ class DeliveryService:
         items = q.order_by(DeliveryRecord.created_at.desc()).offset(skip).limit(limit).all()
         return total, items
 
-    def manual_push(self, notification_id: int, channel_id: int) -> Tuple[Optional[DeliveryRecord], Optional[str]]:
+    def manual_push(
+        self, notification_id: int, channel_id: int
+    ) -> Tuple[Optional[List[DeliveryRecord]], Optional[str]]:
         from app.services.push_service import manual_deliver
         return manual_deliver(self.db, notification_id, channel_id)
 
@@ -437,3 +440,257 @@ class DashboardService:
             pending_material_staff_count=pending_material,
             pending_quality_inspector_count=pending_quality,
         )
+
+
+def _build_timeline(db: Session, batch: MaterialBatch) -> List[dict]:
+    events: List[dict] = []
+
+    for sr in batch.status_records:
+        events.append({
+            "type": "status",
+            "event_type_label": "状态流转",
+            "time": sr.created_at,
+            "from_status": sr.from_status.value if sr.from_status else None,
+            "from_status_label": STATUS_LABEL_MAP.get(sr.from_status) if sr.from_status else None,
+            "to_status": sr.to_status.value,
+            "to_status_label": STATUS_LABEL_MAP.get(sr.to_status, str(sr.to_status)),
+            "operator_name": sr.operator.full_name if sr.operator else None,
+            "operator_role": sr.operator.role.value if sr.operator and sr.operator.role else None,
+            "operator_role_label": ROLE_LABEL_MAP.get(sr.operator.role) if sr.operator and sr.operator.role else None,
+            "remark": sr.remark,
+            "docs_complete": sr.docs_complete,
+            "reinspection_deadline": sr.reinspection_deadline,
+        })
+
+    for n in batch.notifications:
+        events.append({
+            "type": "notification",
+            "event_type_label": "通知生成",
+            "time": n.created_at,
+            "notification_id": n.id,
+            "notification_type": n.type.value if n.type else None,
+            "notification_type_label": _notification_label(n.type),
+            "title": n.title,
+            "recipient_name": n.recipient.full_name if n.recipient else None,
+            "recipient_role": n.recipient_role.value if n.recipient_role else None,
+            "recipient_role_label": ROLE_LABEL_MAP.get(n.recipient_role) if n.recipient_role else None,
+            "is_read": n.is_read,
+            "is_handled": n.is_handled,
+            "sender_name": n.sender.full_name if n.sender else None,
+        })
+
+    for n in batch.notifications:
+        for dr in n.delivery_records:
+            events.append({
+                "type": "delivery",
+                "event_type_label": "外部推送",
+                "time": dr.created_at,
+                "notification_id": n.id,
+                "delivery_id": dr.id,
+                "notification_type": n.type.value if n.type else None,
+                "notification_type_label": _notification_label(n.type),
+                "recipient_role": n.recipient_role.value if n.recipient_role else None,
+                "recipient_role_label": ROLE_LABEL_MAP.get(n.recipient_role) if n.recipient_role else None,
+                "channel_name": dr.channel.name if dr.channel else None,
+                "status": dr.status,
+                "attempt_no": dr.attempt_no,
+                "trigger": dr.trigger,
+                "response_code": dr.response_code,
+                "error_message": dr.error_message,
+                "delivered_at": dr.delivered_at,
+            })
+
+    events.sort(key=lambda e: (e["time"] if e["time"] else datetime.min))
+    return events
+
+
+def _notification_label(nt) -> str:
+    from app.enums import NOTIFICATION_LABEL_MAP
+    return NOTIFICATION_LABEL_MAP.get(nt, str(nt)) if nt else ""
+
+
+ROLE_TODO_STATUS_MAP = {
+    RoleEnum.GATE_STAFF: [StatusNodeEnum.REGISTERED],
+    RoleEnum.MATERIAL_STAFF: [StatusNodeEnum.ARRIVED],
+    RoleEnum.QUALITY_INSPECTOR: [
+        StatusNodeEnum.UNLOADED,
+        StatusNodeEnum.ACCEPTED,
+        StatusNodeEnum.REINSPECTION_PENDING,
+        StatusNodeEnum.SUPERVISOR_REJECTED,
+    ],
+    RoleEnum.SUPERVISOR: [StatusNodeEnum.REINSPECTION_DONE],
+}
+
+PROJECT_MANAGER_WATCH_STATUS = [
+    StatusNodeEnum.REINSPECTION_PENDING,
+    StatusNodeEnum.SUPERVISOR_REJECTED,
+]
+
+
+class TodolistService:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def _batch_to_todo(self, batch: MaterialBatch, responsible_role: Optional[RoleEnum] = None) -> dict:
+        role = responsible_role or STATUS_RESPONSIBLE_ROLE.get(batch.current_status)
+        notif_ids = [n.id for n in batch.notifications]
+        return {
+            "batch_no": batch.batch_no,
+            "batch_id": batch.id,
+            "project_id": batch.project_id,
+            "supplier": batch.supplier,
+            "material_category": batch.material_category,
+            "specification": batch.specification,
+            "quantity": batch.quantity,
+            "unit": batch.unit,
+            "current_status": batch.current_status,
+            "current_status_label": STATUS_LABEL_MAP.get(batch.current_status, str(batch.current_status)),
+            "created_at": batch.created_at,
+            "updated_at": batch.updated_at,
+            "responsible_role": role.value if role else None,
+            "responsible_role_label": ROLE_LABEL_MAP.get(role) if role else None,
+            "related_notification_ids": notif_ids,
+        }
+
+    def get_todolist(self, user_id: int):
+        from app.models import StatusRecord as SR
+        from sqlalchemy import func
+        from datetime import datetime
+
+        user_svc = UserService(self.db)
+        user = user_svc.get_user(user_id)
+        if not user:
+            return None, "用户不存在"
+
+        project_id = user.project_id
+        role = user.role
+
+        batch_list: List[MaterialBatch] = []
+        groups = []
+
+        todo_statuses = ROLE_TODO_STATUS_MAP.get(role, [])
+        if todo_statuses:
+            todos = (
+                self.db.query(MaterialBatch)
+                .filter(
+                    MaterialBatch.project_id == project_id,
+                    MaterialBatch.current_status.in_(todo_statuses),
+                )
+                .order_by(MaterialBatch.updated_at.desc())
+                .all()
+            )
+            batch_list.extend(todos)
+            for s in todo_statuses:
+                cnt = sum(1 for b in todos if b.current_status == s)
+                if cnt > 0:
+                    groups.append({
+                        "group_type": "status",
+                        "status": s.value,
+                        "status_label": STATUS_LABEL_MAP.get(s, str(s)),
+                        "count": cnt,
+                    })
+
+        notif_q = NotificationListQuery(recipient_id=user_id, is_handled=False)
+        notif_svc = NotificationService(self.db)
+        _, unhandled_notifs = notif_svc.list_notifications(notif_q, skip=0, limit=200)
+        notif_batch_ids = list({n.batch_id for n in unhandled_notifs})
+        for bid in notif_batch_ids:
+            if bid not in [b.id for b in batch_list]:
+                b = self.db.query(MaterialBatch).filter(MaterialBatch.id == bid).first()
+                if b:
+                    batch_list.append(b)
+        if unhandled_notifs:
+            groups.append({
+                "group_type": "notification",
+                "label": "待处理通知",
+                "count": len(unhandled_notifs),
+            })
+
+        exception_batches = []
+        if role == RoleEnum.PROJECT_MANAGER:
+            now = datetime.utcnow()
+            overdue_subq = (
+                self.db.query(SR.batch_id, func.max(SR.id).label("latest_id"))
+                .filter(
+                    SR.to_status == StatusNodeEnum.REINSPECTION_PENDING,
+                    SR.reinspection_deadline.isnot(None),
+                )
+                .group_by(SR.batch_id)
+                .subquery()
+            )
+            overs = (
+                self.db.query(MaterialBatch)
+                .join(overdue_subq, overdue_subq.c.batch_id == MaterialBatch.id)
+                .join(SR, SR.id == overdue_subq.c.latest_id)
+                .filter(
+                    MaterialBatch.project_id == project_id,
+                    MaterialBatch.current_status == StatusNodeEnum.REINSPECTION_PENDING,
+                    SR.reinspection_deadline < now,
+                )
+                .all()
+            )
+            rejects = (
+                self.db.query(MaterialBatch)
+                .filter(
+                    MaterialBatch.project_id == project_id,
+                    MaterialBatch.current_status == StatusNodeEnum.SUPERVISOR_REJECTED,
+                )
+                .all()
+            )
+            for b in overs + rejects:
+                if b.id not in [x["batch_id"] for x in exception_batches]:
+                    exception_batches.append(self._batch_to_todo(b))
+            if exception_batches:
+                groups.append({
+                    "group_type": "exception",
+                    "label": "关注异常批次",
+                    "count": len(exception_batches),
+                })
+
+        batch_items = [self._batch_to_todo(b) for b in batch_list]
+        notif_items = []
+        for n in unhandled_notifs:
+            nd = n.__dict__.copy()
+            nd["batch_no"] = n.batch.batch_no if n.batch else None
+            notif_items.append(nd)
+
+        return {
+            "user_id": user.id,
+            "user_role": role,
+            "user_role_label": ROLE_LABEL_MAP.get(role, str(role)),
+            "total_count": len(batch_items) + len(unhandled_notifs),
+            "groups": groups,
+            "batches": batch_items,
+            "notifications": notif_items,
+            "exception_batches": exception_batches,
+        }, None
+
+
+class NotificationRuleService:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def list_rules(self, project_id: str):
+        from app.services.push_service import list_notify_rules
+        raw = list_notify_rules(self.db, project_id)
+        result = []
+        for r in raw:
+            result.append({
+                "event_type": r["event_type"],
+                "event_label": r["event_label"],
+                "roles": r["roles"],
+                "role_labels": r["role_labels"],
+                "is_custom": r["is_custom"],
+                "rule_id": r["rule_id"],
+                "updated_at": r["updated_at"],
+            })
+        return {
+            "project_id": project_id,
+            "rules": result,
+        }
+
+    def set_rule(self, project_id: str, event_type, roles, created_by: int):
+        from app.services.push_service import set_notify_roles
+        rule = set_notify_roles(self.db, project_id, event_type, roles, created_by)
+        return self.list_rules(project_id), None
+

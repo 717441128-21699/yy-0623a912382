@@ -134,6 +134,8 @@ class DeliveryRecord(Base):
     notification_id = Column(Integer, ForeignKey("notifications.id"), nullable=False)
     channel_id = Column(Integer, ForeignKey("push_channels.id"), nullable=False)
     status = Column(String(20), nullable=False, default="pending")
+    attempt_no = Column(Integer, default=1)
+    trigger = Column(String(20), default="auto")
     request_body = Column(Text)
     response_code = Column(Integer)
     response_body = Column(Text)
@@ -144,3 +146,16 @@ class DeliveryRecord(Base):
 
     notification = relationship("Notification", back_populates="delivery_records")
     channel = relationship("PushChannel", back_populates="delivery_records")
+
+
+class NotificationRule(Base):
+    __tablename__ = "notification_rules"
+
+    id = Column(Integer, primary_key=True, index=True)
+    project_id = Column(String(50), index=True, nullable=False)
+    event_type = Column(SAEnum(NotificationTypeEnum), nullable=False)
+    roles_json = Column(Text, nullable=False)
+    enabled = Column(Boolean, default=True)
+    created_by = Column(Integer, ForeignKey("users.id"))
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

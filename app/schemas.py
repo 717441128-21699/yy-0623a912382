@@ -138,6 +138,7 @@ class BatchDetailResponse(BaseModel):
     current_responsible_role: Optional[RoleEnum] = None
     current_responsible_role_label: Optional[str] = None
     next_available_nodes: List[NextNodeInfo] = Field(default_factory=list)
+    timeline: List[dict] = Field(default_factory=list)
 
     class Config:
         from_attributes = True
@@ -277,6 +278,8 @@ class DeliveryRecordResponse(BaseModel):
     channel_id: int
     channel_name: Optional[str] = None
     status: str
+    attempt_no: int
+    trigger: str
     request_body: Optional[str] = None
     response_code: Optional[int] = None
     response_body: Optional[str] = None
@@ -322,3 +325,56 @@ class DashboardResponse(BaseModel):
     overdue_reinspection_count: int
     pending_material_staff_count: int
     pending_quality_inspector_count: int
+
+
+class TodoBatchItem(BaseModel):
+    batch_no: str
+    batch_id: int
+    project_id: str
+    supplier: str
+    material_category: str
+    specification: str
+    quantity: int
+    unit: str
+    current_status: StatusNodeEnum
+    current_status_label: str
+    created_at: datetime
+    updated_at: datetime
+    responsible_role: Optional[str] = None
+    responsible_role_label: Optional[str] = None
+    related_notification_ids: List[int] = Field(default_factory=list)
+
+    class Config:
+        from_attributes = True
+
+
+class TodolistResponse(BaseModel):
+    user_id: int
+    user_role: RoleEnum
+    user_role_label: str
+    total_count: int
+    groups: List[dict] = Field(default_factory=list)
+    batches: List[TodoBatchItem] = Field(default_factory=list)
+    notifications: List[NotificationResponse] = Field(default_factory=list)
+    exception_batches: List[TodoBatchItem] = Field(default_factory=list)
+
+
+class NotificationRuleSetRequest(BaseModel):
+    project_id: str
+    event_type: NotificationTypeEnum
+    roles: List[RoleEnum]
+
+
+class NotificationRuleItem(BaseModel):
+    event_type: NotificationTypeEnum
+    event_label: str
+    roles: List[RoleEnum]
+    role_labels: List[str]
+    is_custom: bool
+    rule_id: Optional[int] = None
+    updated_at: Optional[datetime] = None
+
+
+class NotificationRuleListResponse(BaseModel):
+    project_id: str
+    rules: List[NotificationRuleItem]

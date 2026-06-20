@@ -12,14 +12,9 @@ from app.enums import (
 )
 
 
-NOTIFY_ROLES = [
-    RoleEnum.MATERIAL_STAFF,
-    RoleEnum.QUALITY_INSPECTOR,
-    RoleEnum.PROJECT_MANAGER,
-]
-
-
 def _get_project_users(db: Session, project_id: str, roles: List[RoleEnum]) -> List[User]:
+    if not roles:
+        return []
     return (
         db.query(User)
         .filter(
@@ -28,6 +23,11 @@ def _get_project_users(db: Session, project_id: str, roles: List[RoleEnum]) -> L
         )
         .all()
     )
+
+
+def _resolve_roles(db: Session, project_id: str, event_type: NotificationTypeEnum) -> List[RoleEnum]:
+    from app.services.push_service import get_notify_roles
+    return get_notify_roles(db, project_id, event_type)
 
 
 def _create_notification(
@@ -74,7 +74,8 @@ def notify_missing_docs(
         f"数量：{batch.quantity}{batch.unit}，供应商：{batch.supplier}。"
         f"请材料员尽快补齐相关资料。备注：{status_record.remark or '无'}"
     )
-    users = _get_project_users(db, batch.project_id, NOTIFY_ROLES)
+    roles = _resolve_roles(db, batch.project_id, NotificationTypeEnum.MISSING_DOCS)
+    users = _get_project_users(db, batch.project_id, roles)
     results = []
     for user in users:
         results.append(
@@ -99,7 +100,8 @@ def notify_supervisor_reject(
         f"请相关人员立即处理，处理建议：重新送检或联系供应商。"
         f"驳回原因：{status_record.remark or '未填写'}"
     )
-    users = _get_project_users(db, batch.project_id, NOTIFY_ROLES)
+    roles = _resolve_roles(db, batch.project_id, NotificationTypeEnum.SUPERVISOR_REJECT)
+    users = _get_project_users(db, batch.project_id, roles)
     results = []
     for user in users:
         results.append(
@@ -120,7 +122,8 @@ def notify_reinspection_overdue(db: Session, batch: MaterialBatch) -> List[Notif
         f"数量：{batch.quantity}{batch.unit}，供应商：{batch.supplier}。"
         f"请质检员立即安排复检，项目经理督促跟进。"
     )
-    users = _get_project_users(db, batch.project_id, NOTIFY_ROLES)
+    roles = _resolve_roles(db, batch.project_id, NotificationTypeEnum.REINSPECTION_OVERDUE)
+    users = _get_project_users(db, batch.project_id, roles)
     results = []
     for user in users:
         results.append(

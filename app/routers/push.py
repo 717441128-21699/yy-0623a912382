@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
 
@@ -111,26 +111,31 @@ def list_deliveries(
 
 @router.post(
     "/manual",
-    response_model=DeliveryRecordResponse,
-    summary="手动重试投递",
-    description="对指定通知通过指定通道手动重新推送（已成功投递的不会重复）",
+    response_model=DeliveryRecordListResponse,
+    summary="手动重试投递（返回所有尝试记录）",
+    description="对指定通知通过指定通道手动重新推送，返回该通道该通知的所有投递记录（含历史）",
 )
 def manual_push(
     req: ManualPushRequest,
     db: Session = Depends(get_db),
 ):
     svc = DeliveryService(db)
-    record, err = svc.manual_push(req.notification_id, req.channel_id)
-    if err:
+    records, err = svc.manual_push(req.notification_id, req.channel_id)
+    if err and not records:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err)
-    resp = DeliveryRecordResponse.model_validate(record)
-    resp.channel_name = record.channel.name if record.channel else None
-    notif = record.notification
-    if notif:
-        resp.notification_type = notif.type.value if notif.type else None
-        resp.recipient_id = notif.recipient_id
-        resp.recipient_role = notif.recipient_role.value if notif.recipient_role else None
-        if notif.batch:
-            resp.batch_id = notif.batch.id
-            resp.batch_no = notif.batch.batch_no
-    return resp
+
+    result = []
+    for record in records:
+        resp = DeliveryRecordResponse.model_validate(record)
+        resp.channel_name = record.channel.name if record.channel else None
+        notif = record.notification
+        if notif:
+            resp.notification_type = notif.type.value if notif.type else None
+            resp.recipient_id = notif.recipient_id
+            resp.recipient_role = notif.recipient_role.value if notif.recipient_role else None
+            if notif.batch:
+                resp.batch_id = notif.batch.id
+                resp.batch_no = notif.batch.batch_no
+        result.append(resp)
+
+    return DeliveryRecordListResponse(total=len(result), items=result)
