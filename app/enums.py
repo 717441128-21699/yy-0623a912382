@@ -53,6 +53,27 @@ STATUS_FLOW_RULES = {
 }
 
 
+ROLE_STATUS_PERMISSIONS = {
+    RoleEnum.GATE_STAFF: [StatusNodeEnum.ARRIVED, StatusNodeEnum.EXITED],
+    RoleEnum.MATERIAL_STAFF: [StatusNodeEnum.UNLOADED, StatusNodeEnum.EXITED],
+    RoleEnum.QUALITY_INSPECTOR: [StatusNodeEnum.ACCEPTED, StatusNodeEnum.REINSPECTION_PENDING, StatusNodeEnum.REINSPECTION_DONE, StatusNodeEnum.EXITED],
+    RoleEnum.SUPERVISOR: [StatusNodeEnum.SUPERVISOR_REJECTED, StatusNodeEnum.EXITED],
+    RoleEnum.PROJECT_MANAGER: [StatusNodeEnum.EXITED],
+}
+
+
+STATUS_RESPONSIBLE_ROLE = {
+    StatusNodeEnum.REGISTERED: RoleEnum.MATERIAL_STAFF,
+    StatusNodeEnum.ARRIVED: RoleEnum.MATERIAL_STAFF,
+    StatusNodeEnum.UNLOADED: RoleEnum.QUALITY_INSPECTOR,
+    StatusNodeEnum.ACCEPTED: RoleEnum.QUALITY_INSPECTOR,
+    StatusNodeEnum.REINSPECTION_PENDING: RoleEnum.QUALITY_INSPECTOR,
+    StatusNodeEnum.REINSPECTION_DONE: RoleEnum.SUPERVISOR,
+    StatusNodeEnum.SUPERVISOR_REJECTED: RoleEnum.QUALITY_INSPECTOR,
+    StatusNodeEnum.EXITED: None,
+}
+
+
 class NotificationTypeEnum(str, Enum):
     MISSING_DOCS = "missing_docs"
     REINSPECTION_OVERDUE = "reinspection_overdue"

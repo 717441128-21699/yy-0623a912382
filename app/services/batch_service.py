@@ -2,20 +2,50 @@ from typing import List, Optional, Tuple
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
 
-from app.enums import StatusNodeEnum, STATUS_FLOW_RULES
-from app.models import MaterialBatch, Attachment, StatusRecord, User, Notification
+from app.enums import (
+    StatusNodeEnum,
+    STATUS_FLOW_RULES,
+    STATUS_LABEL_MAP,
+    ROLE_LABEL_MAP,
+    ROLE_STATUS_PERMISSIONS,
+    STATUS_RESPONSIBLE_ROLE,
+    RoleEnum,
+)
+from app.models import MaterialBatch, Attachment, StatusRecord, User, Notification, PushChannel, DeliveryRecord
 from app.schemas import (
     BatchRegisterRequest,
     StatusUpdateRequest,
     BatchListQuery,
+    BatchDetailResponse,
+    NextNodeInfo,
     NotificationListQuery,
     NotificationHandleRequest,
+    PushChannelCreate,
+    PushChannelUpdate,
+    DeliveryRecordListQuery,
 )
 from app.utils import generate_batch_no
 from app.services.notification_service import (
     check_and_notify_status,
     compute_reinspection_deadline,
 )
+
+
+def _build_next_nodes(current_status: StatusNodeEnum) -> List[NextNodeInfo]:
+    allowed = STATUS_FLOW_RULES.get(current_status, [])
+    result = []
+    for node in allowed:
+        allowed_roles = [
+            role for role, nodes in ROLE_STATUS_PERMISSIONS.items()
+            if node in nodes
+        ]
+        result.append(NextNodeInfo(
+            node=node,
+            label=STATUS_LABEL_MAP.get(node, str(node)),
+            allowed_roles=allowed_roles,
+            allowed_role_labels=[ROLE_LABEL_MAP.get(r, str(r)) for r in allowed_roles],
+        ))
+    return result
 
 
 class BatchService:
@@ -89,10 +119,22 @@ class BatchService:
         current_status = batch.current_status
         allowed_next = STATUS_FLOW_RULES.get(current_status, [])
         if req.to_status not in allowed_next:
-            allowed_labels = [STATUS_FLOW_RULES.get(s, {}).get(s, s) for s in allowed_next]
-            from app.enums import STATUS_LABEL_MAP
             current_label = STATUS_LABEL_MAP.get(current_status, str(current_status))
-            return None, f"状态流转不合法：当前状态【{current_label}】不能流转到目标状态"
+            target_label = STATUS_LABEL_MAP.get(req.to_status, str(req.to_status))
+            allowed_labels = [STATUS_LABEL_MAP.get(s, str(s)) for s in allowed_next]
+            return None, (
+                f"状态流转不合法：当前状态【{current_label}】不能流转到【{target_label}】，"
+                f"当前可流转节点：{'、'.join(allowed_labels) if allowed_labels else '无（已终结）'}"
+            )
+
+        permitted_nodes = ROLE_STATUS_PERMISSIONS.get(operator.role, [])
+        if req.to_status not in permitted_nodes:
+            operator_role_label = ROLE_LABEL_MAP.get(operator.role, str(operator.role))
+            target_label = STATUS_LABEL_MAP.get(req.to_status, str(req.to_status))
+            return None, (
+                f"角色无权限：{operator_role_label}（{operator.full_name}）无权操作【{target_label}】节点，"
+                f"请联系对应角色人员处理"
+            )
 
         reinspection_deadline = None
         if req.to_status == StatusNodeEnum.REINSPECTION_PENDING:
@@ -119,8 +161,17 @@ class BatchService:
         self.db.refresh(record)
         return record, None
 
-    def get_batch_detail(self, batch_no: str) -> Optional[MaterialBatch]:
-        return self._get_batch_by_no(batch_no)
+    def get_batch_detail(self, batch_no: str) -> Optional[dict]:
+        batch = self._get_batch_by_no(batch_no)
+        if not batch:
+            return None
+
+        resp = BatchDetailResponse.model_validate(batch)
+        responsible_role = STATUS_RESPONSIBLE_ROLE.get(batch.current_status)
+        resp.current_responsible_role = responsible_role
+        resp.current_responsible_role_label = ROLE_LABEL_MAP.get(responsible_role) if responsible_role else None
+        resp.next_available_nodes = _build_next_nodes(batch.current_status)
+        return resp
 
     def list_batches(self, query: BatchListQuery, skip: int = 0, limit: int = 50) -> Tuple[int, List[MaterialBatch]]:
         q = self.db.query(MaterialBatch)
@@ -233,3 +284,78 @@ class UserService:
         if role:
             q = q.filter(User.role == role)
         return q.all()
+
+
+class PushChannelService:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def create_channel(self, req: PushChannelCreate) -> PushChannel:
+        channel = PushChannel(
+            name=req.name,
+            project_id=req.project_id,
+            callback_url=req.callback_url,
+            secret=req.secret,
+            headers_json=req.headers_json,
+            enabled=req.enabled if req.enabled is not None else True,
+            max_retries=req.max_retries or 3,
+            timeout_seconds=req.timeout_seconds or 5.0,
+        )
+        self.db.add(channel)
+        self.db.commit()
+        self.db.refresh(channel)
+        return channel
+
+    def update_channel(self, channel_id: int, req: PushChannelUpdate) -> Tuple[Optional[PushChannel], Optional[str]]:
+        channel = self.db.query(PushChannel).filter(PushChannel.id == channel_id).first()
+        if not channel:
+            return None, "推送通道不存在"
+        update_data = req.model_dump(exclude_unset=True)
+        for key, value in update_data.items():
+            setattr(channel, key, value)
+        self.db.commit()
+        self.db.refresh(channel)
+        return channel, None
+
+    def delete_channel(self, channel_id: int) -> Tuple[bool, Optional[str]]:
+        channel = self.db.query(PushChannel).filter(PushChannel.id == channel_id).first()
+        if not channel:
+            return False, "推送通道不存在"
+        self.db.delete(channel)
+        self.db.commit()
+        return True, None
+
+    def get_channel(self, channel_id: int) -> Optional[PushChannel]:
+        return self.db.query(PushChannel).filter(PushChannel.id == channel_id).first()
+
+    def list_channels(self, project_id: Optional[str] = None, enabled: Optional[bool] = None) -> List[PushChannel]:
+        q = self.db.query(PushChannel)
+        if project_id:
+            q = q.filter(PushChannel.project_id == project_id)
+        if enabled is not None:
+            q = q.filter(PushChannel.enabled == enabled)
+        return q.order_by(PushChannel.created_at.desc()).all()
+
+
+class DeliveryService:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def list_records(self, query: DeliveryRecordListQuery, skip: int = 0, limit: int = 50) -> Tuple[int, List[DeliveryRecord]]:
+        q = self.db.query(DeliveryRecord)
+        filters = []
+        if query.notification_id:
+            filters.append(DeliveryRecord.notification_id == query.notification_id)
+        if query.channel_id:
+            filters.append(DeliveryRecord.channel_id == query.channel_id)
+        if query.status:
+            filters.append(DeliveryRecord.status == query.status)
+        if filters:
+            q = q.filter(and_(*filters))
+        total = q.count()
+        items = q.order_by(DeliveryRecord.created_at.desc()).offset(skip).limit(limit).all()
+        return total, items
+
+    def manual_push(self, notification_id: int, channel_id: int) -> Tuple[Optional[DeliveryRecord], Optional[str]]:
+        from app.services.push_service import manual_deliver
+        return manual_deliver(self.db, notification_id, channel_id)

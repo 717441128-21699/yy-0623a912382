@@ -38,6 +38,7 @@ def _create_notification(
     content: str,
     recipient: User,
     sender_id: Optional[int] = None,
+    auto_push: bool = True,
 ) -> Notification:
     notif = Notification(
         batch_id=batch.id,
@@ -49,6 +50,15 @@ def _create_notification(
         recipient_role=recipient.role,
     )
     db.add(notif)
+    db.flush()
+
+    if auto_push:
+        try:
+            from app.services.push_service import auto_deliver_notification
+            auto_deliver_notification(db, notif)
+        except Exception:
+            pass
+
     return notif
 
 
@@ -140,13 +150,29 @@ def check_and_notify_status(
 
 
 def scan_and_notify_overdue(db: Session) -> dict:
+    from sqlalchemy import func
+
     now = datetime.utcnow()
+
+    subq = (
+        db.query(
+            StatusRecord.batch_id,
+            func.max(StatusRecord.id).label("latest_id"),
+        )
+        .filter(
+            StatusRecord.to_status == StatusNodeEnum.REINSPECTION_PENDING,
+            StatusRecord.reinspection_deadline.isnot(None),
+        )
+        .group_by(StatusRecord.batch_id)
+        .subquery()
+    )
+
     overdue_batches = (
         db.query(MaterialBatch)
-        .join(StatusRecord, StatusRecord.batch_id == MaterialBatch.id)
+        .join(subq, subq.c.batch_id == MaterialBatch.id)
+        .join(StatusRecord, StatusRecord.id == subq.c.latest_id)
         .filter(
             MaterialBatch.current_status == StatusNodeEnum.REINSPECTION_PENDING,
-            StatusRecord.to_status == StatusNodeEnum.REINSPECTION_PENDING,
             StatusRecord.reinspection_deadline < now,
         )
         .all()

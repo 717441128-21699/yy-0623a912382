@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 from app.enums import RoleEnum, StatusNodeEnum, NotificationTypeEnum, STATUS_LABEL_MAP, ROLE_LABEL_MAP
@@ -79,10 +79,6 @@ class BatchRegisterResponse(BaseModel):
     message: str = "批次登记成功"
 
 
-class StatusRecordBase(BaseModel):
-    pass
-
-
 class StatusUpdateRequest(BaseModel):
     batch_no: str = Field(..., description="批次号")
     to_status: StatusNodeEnum = Field(..., description="目标状态节点")
@@ -90,6 +86,13 @@ class StatusUpdateRequest(BaseModel):
     remark: Optional[str] = None
     docs_complete: Optional[bool] = True
     has_reinspection: Optional[bool] = False
+
+
+class NextNodeInfo(BaseModel):
+    node: StatusNodeEnum
+    label: str
+    allowed_roles: List[RoleEnum]
+    allowed_role_labels: List[str]
 
 
 class StatusRecordResponse(BaseModel):
@@ -132,6 +135,9 @@ class BatchDetailResponse(BaseModel):
     updated_at: datetime
     attachments: List[AttachmentResponse] = Field(default_factory=list)
     status_records: List[StatusRecordResponse] = Field(default_factory=list)
+    current_responsible_role: Optional[RoleEnum] = None
+    current_responsible_role_label: Optional[str] = None
+    next_available_nodes: List[NextNodeInfo] = Field(default_factory=list)
 
     class Config:
         from_attributes = True
@@ -139,12 +145,6 @@ class BatchDetailResponse(BaseModel):
     @property
     def current_status_label(self) -> str:
         return STATUS_LABEL_MAP.get(self.current_status, str(self.current_status))
-
-    @property
-    def current_operator(self) -> Optional[UserSimple]:
-        if self.status_records:
-            return self.status_records[-1].operator
-        return None
 
 
 class BatchListQuery(BaseModel):
@@ -226,3 +226,75 @@ class NotificationListQuery(BaseModel):
 class NotificationListResponse(BaseModel):
     total: int
     items: List[NotificationResponse]
+
+
+class PushChannelCreate(BaseModel):
+    name: str = Field(..., description="通道名称", min_length=1)
+    project_id: str = Field(..., description="项目编号")
+    callback_url: str = Field(..., description="回调地址", min_length=1)
+    secret: Optional[str] = None
+    headers_json: Optional[str] = None
+    enabled: Optional[bool] = True
+    max_retries: Optional[int] = 3
+    timeout_seconds: Optional[float] = 5.0
+
+
+class PushChannelUpdate(BaseModel):
+    name: Optional[str] = None
+    callback_url: Optional[str] = None
+    secret: Optional[str] = None
+    headers_json: Optional[str] = None
+    enabled: Optional[bool] = None
+    max_retries: Optional[int] = None
+    timeout_seconds: Optional[float] = None
+
+
+class PushChannelResponse(BaseModel):
+    id: int
+    name: str
+    project_id: str
+    callback_url: str
+    secret: Optional[str] = None
+    headers_json: Optional[str] = None
+    enabled: bool
+    max_retries: int
+    timeout_seconds: float
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class DeliveryRecordResponse(BaseModel):
+    id: int
+    notification_id: int
+    channel_id: int
+    channel_name: Optional[str] = None
+    status: str
+    request_body: Optional[str] = None
+    response_code: Optional[int] = None
+    response_body: Optional[str] = None
+    retry_count: int
+    error_message: Optional[str] = None
+    delivered_at: Optional[datetime] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class DeliveryRecordListQuery(BaseModel):
+    notification_id: Optional[int] = None
+    channel_id: Optional[int] = None
+    status: Optional[str] = None
+
+
+class DeliveryRecordListResponse(BaseModel):
+    total: int
+    items: List[DeliveryRecordResponse]
+
+
+class ManualPushRequest(BaseModel):
+    notification_id: int = Field(..., description="待投递的通知ID")
+    channel_id: int = Field(..., description="目标推送通道ID")

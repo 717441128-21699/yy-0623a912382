@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, Enum as SAEnum, Boolean
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, Enum as SAEnum, Boolean, Float
 from sqlalchemy.orm import relationship, declarative_base
 
 from app.enums import RoleEnum, StatusNodeEnum, NotificationTypeEnum
@@ -106,3 +106,41 @@ class Notification(Base):
     batch = relationship("MaterialBatch", back_populates="notifications")
     sender = relationship("User", back_populates="sent_notifications", foreign_keys=[sender_id])
     recipient = relationship("User", back_populates="received_notifications", foreign_keys=[recipient_id])
+    delivery_records = relationship("DeliveryRecord", back_populates="notification", cascade="all, delete-orphan")
+
+
+class PushChannel(Base):
+    __tablename__ = "push_channels"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), nullable=False)
+    project_id = Column(String(50), index=True, nullable=False)
+    callback_url = Column(String(500), nullable=False)
+    secret = Column(String(200))
+    headers_json = Column(Text)
+    enabled = Column(Boolean, default=True)
+    max_retries = Column(Integer, default=3)
+    timeout_seconds = Column(Float, default=5.0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    delivery_records = relationship("DeliveryRecord", back_populates="channel", cascade="all, delete-orphan")
+
+
+class DeliveryRecord(Base):
+    __tablename__ = "delivery_records"
+
+    id = Column(Integer, primary_key=True, index=True)
+    notification_id = Column(Integer, ForeignKey("notifications.id"), nullable=False)
+    channel_id = Column(Integer, ForeignKey("push_channels.id"), nullable=False)
+    status = Column(String(20), nullable=False, default="pending")
+    request_body = Column(Text)
+    response_code = Column(Integer)
+    response_body = Column(Text)
+    retry_count = Column(Integer, default=0)
+    error_message = Column(Text)
+    delivered_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    notification = relationship("Notification", back_populates="delivery_records")
+    channel = relationship("PushChannel", back_populates="delivery_records")

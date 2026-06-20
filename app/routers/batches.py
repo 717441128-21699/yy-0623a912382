@@ -36,18 +36,18 @@ def register_batch(
 @router.get(
     "/{batch_no}",
     response_model=BatchDetailResponse,
-    summary="按批次号查询详情",
-    description="查询当前节点、历史流转记录、责任人、附件等完整信息",
+    summary="按批次号查询详情（含当前责任人+可流转节点）",
+    description="查询当前节点、责任人角色、下一步可走哪些节点及对应有权限的角色、历史流转记录、附件等",
 )
 def get_batch_detail(
     batch_no: str,
     db: Session = Depends(get_db),
 ):
     svc = BatchService(db)
-    batch = svc.get_batch_detail(batch_no)
-    if not batch:
+    detail = svc.get_batch_detail(batch_no)
+    if not detail:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="批次不存在")
-    return batch
+    return detail
 
 
 @router.post(

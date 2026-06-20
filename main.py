@@ -9,7 +9,7 @@ from app.services.batch_service import UserService
 from app.enums import RoleEnum
 from app.config import settings as app_settings
 
-from app.routers import batches, status, notifications, users
+from app.routers import batches, status, notifications, users, push
 
 
 def seed_initial_data():
@@ -81,3 +81,4 @@ app.include_router(users.router, prefix=api_prefix)
 app.include_router(batches.router, prefix=api_prefix)
 app.include_router(status.router, prefix=api_prefix)
 app.include_router(notifications.router, prefix=api_prefix)
+app.include_router(push.router, prefix=api_prefix)
